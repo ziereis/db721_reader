@@ -96,6 +96,7 @@ namespace duckdb {
     unique_ptr<db721MetaData> metadata;
     vector<LogicalType> return_types;
     vector<string> names;
+    vector<column_t> column_ids;
 
 
   };

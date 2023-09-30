@@ -32,10 +32,13 @@ struct db721ScanBindData : public TableFunctionData {
   vector<db721ScanColumData> column_data;
 };
 
+struct db721ScanGlobalState : public GlobalTableFunctionState {
+};
+
 class db721ScanFunction : public TableFunction {
 public:
   db721ScanFunction()
-  : TableFunction("db721_scan", {LogicalType::VARCHAR}, db721ScanImplementation, db721ScanBind) {
+  : TableFunction("db721_scan", {LogicalType::VARCHAR}, db721ScanImplementation, db721ScanBind, db721ScanInitGlobal) {
     projection_pushdown = true;
   }
 private:
@@ -82,6 +85,15 @@ private:
     }
   }
 
+  static unique_ptr<GlobalTableFunctionState> db721ScanInitGlobal(ClientContext &context,
+                                                                  TableFunctionInitInput &input) {
+    input.bind_data->Cast<db721ScanBindData>().reader->column_ids = input.column_ids;
+    auto result = make_uniq<db721ScanGlobalState>();
+
+    return std::move(result);
+  }
+
+
   static void db721ScanImplementation(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
 
@@ -118,7 +130,7 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
     }
 
     for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
-      auto file_col_idx = data.column_ids[out_col_idx];
+      auto file_col_idx = data.reader->column_ids[out_col_idx];
 
       if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
         continue;
@@ -135,7 +147,7 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
   D_ASSERT(output.size() > 0);
 
   for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
-    auto file_col_idx = data.column_ids[out_col_idx];
+    auto file_col_idx = data.reader->column_ids[out_col_idx];
 
     if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
       Value constant_42 = Value::BIGINT(42);
