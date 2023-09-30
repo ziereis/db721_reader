@@ -31,6 +31,11 @@ UNION ALL
 (SELECT * FROM truth EXCEPT SELECT * FROM loaded);
 ----
 
+query I
+SELECT COUNT(*) FROM db721_scan('data/data-chickens.db721');
+----
+120000
+
 
 
 

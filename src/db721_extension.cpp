@@ -119,6 +119,11 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
 
     for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
       auto file_col_idx = data.column_ids[out_col_idx];
+
+      if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+        continue;
+      }
+
       prepare_chunk_buffer(data, file_col_idx);
       data.column_data[file_col_idx].chuck_offset = 0;
       data.column_data[file_col_idx].chunk_size =
@@ -131,6 +136,13 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
 
   for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
     auto file_col_idx = data.column_ids[out_col_idx];
+
+    if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+      Value constant_42 = Value::BIGINT(42);
+      output.data[out_col_idx].Reference(constant_42);
+      continue;
+    }
+
     auto &col_data = data.column_data[file_col_idx];
     idx_t output_offset = 0;
     while (output_offset < output.size()) {
