@@ -1,0 +1,18 @@
+# name: test/sql/db721.test
+# description: test db721 extension
+# group: [db721]
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM db721_scan('fails');
+----
+Catalog Error: Table Function with name db721_scan does not exist!
+
+
+require db721
+
+query I
+SELECT * FROM db721_scan('data/data-chickens.db721');
+
+
+
