@@ -50,6 +50,7 @@ private:
     result->group_offset = 0;
     result->current_group = -1;
     result->reader = std::move(reader);
+    result->column_data.resize(return_types.size());
 
     return std::move(result);
   }
@@ -89,8 +90,9 @@ template<>
 void db721ScanFunction::fill_from_plain<string>(db721ScanColumData& col_data, idx_t count, Vector& target,
                              idx_t target_offset) {
   for (idx_t i = 0; i < count; i++) {
+    auto str_len = strlen(reinterpret_cast<const char *>(col_data.buf.ptr));
     FlatVector::GetData<string_t>(target)[i + target_offset] =
-        StringVector::AddString(target, reinterpret_cast<const char *>(col_data.buf.ptr), 32);
+        StringVector::AddString(target, reinterpret_cast<const char *>(col_data.buf.ptr), str_len);
     col_data.buf.inc(32);
   }
 }
@@ -103,7 +105,7 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
   }
 
   if ((data.current_group < 0) ||
-      (data.group_offset >= data.reader->metadata->columns[0].num_blocks)) {
+      (data.group_offset >= data.reader->metadata->columns[0].block_stats[data.current_group]->count)) {
     data.current_group++;
     data.group_offset = 0;
     if (data.current_group >= data.reader->metadata->NumRowGroups()) {
@@ -120,7 +122,7 @@ void db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
     }
   }
 
-  output.SetCardinality(std::min((int64_t)STANDARD_VECTOR_SIZE, data.reader->metadata->columns[0].num_blocks - data.group_offset));
+  output.SetCardinality(std::min((int64_t)STANDARD_VECTOR_SIZE, data.reader->metadata->columns[0].block_stats[data.current_group]->count - data.group_offset));
   D_ASSERT(output.size() > 0);
 
   for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
