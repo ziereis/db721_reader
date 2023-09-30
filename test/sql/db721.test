@@ -17,4 +17,22 @@ SELECT * FROM db721_scan('data/data-chickens.db721') LIMIT 1;
 1	Cheep Birds	MMF	FEMALE	5.65	2760.2078	WOODY
 
 
+#csv ground truth
+statement ok
+CREATE TABLE truth AS SELECT * FROM 'data/data-farms.csv';
+
+statement ok
+CREATE TABLE loaded AS SELECT * FROM db721_scan('data/data-farms.db721');
+
+#supposed to be empty
+query III
+(SELECT * FROM truth EXCEPT SELECT * FROM loaded)
+UNION ALL
+(SELECT * FROM truth EXCEPT SELECT * FROM loaded);
+----
+
+
+
+
+
 

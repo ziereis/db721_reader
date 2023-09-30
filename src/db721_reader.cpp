@@ -36,7 +36,6 @@ namespace duckdb {
     return yyjson_get_int(&obj);
   }
   float JsonReader::get_float(yyjson_val &obj) const {
-    D_ASSERT(yyjson_is_real(&obj));
     return static_cast<float>(yyjson_get_real(&obj));
 
   }

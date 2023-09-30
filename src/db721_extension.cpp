@@ -65,6 +65,8 @@ private:
 
     auto* file_handle  = data.reader->file_handle.get();
 
+    data.column_data[col_idx].buf = ResizeableBuffer();
+
     file_handle->Seek(chunk_start);
     data.column_data[col_idx].buf.resize(data.reader->allocator,chunk_len);
     file_handle->Read(data.column_data[col_idx].buf.ptr, chunk_len);
@@ -91,8 +93,10 @@ void db721ScanFunction::fill_from_plain<string>(db721ScanColumData& col_data, id
                              idx_t target_offset) {
   for (idx_t i = 0; i < count; i++) {
     auto str_len = strlen(reinterpret_cast<const char *>(col_data.buf.ptr));
+    string str(reinterpret_cast<const char *>(col_data.buf.ptr));
+    D_ASSERT(str_len <= 32);
     FlatVector::GetData<string_t>(target)[i + target_offset] =
-        StringVector::AddString(target, reinterpret_cast<const char *>(col_data.buf.ptr), str_len);
+        StringVector::AddString(target, str.data(), str.size());
     col_data.buf.inc(32);
   }
 }
