@@ -37,7 +37,3 @@ SELECT COUNT(*) FROM db721_scan('data/data-chickens.db721');
 120000
 
 
-
-
-
-

@@ -240,4 +240,64 @@ namespace duckdb {
         }
   }
 
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsString& blockstats) {
+        auto string_stats = StringStats::CreateEmpty(LogicalType::VARCHAR);
+        StringStats::Update(string_stats, blockstats.min);
+        StringStats::Update(string_stats, blockstats.max);
+        return string_stats.ToUnique();
+  }
+
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsInt& blockstats) {
+        auto stats = NumericStats::CreateUnknown(LogicalType::INTEGER);
+
+        Value min = blockstats.min;
+        Value max = blockstats.max;
+
+        NumericStats::SetMax(stats, max);
+        NumericStats::SetMin(stats, min);
+
+        return stats.ToUnique();
+  }
+
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsFloat& blockstats) {
+        auto stats = NumericStats::CreateUnknown(LogicalType::FLOAT);
+
+        Value min = blockstats.min;
+        Value max = blockstats.max;
+
+        NumericStats::SetMax(stats, max);
+        NumericStats::SetMin(stats, min);
+
+        return stats.ToUnique();
+  }
+
+  unique_ptr<BaseStatistics> db721Reader::ReadStatistics(column_t col_idx) const {
+        unique_ptr<BaseStatistics> column_stats;
+
+        auto& column_metadata = metadata->columns[col_idx];
+
+        for (auto& row_group : column_metadata.block_stats) {
+            unique_ptr<BaseStatistics> chunk_stats;
+            switch (column_metadata.type) {
+            case db721MetaData::db721Type::INT:
+              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsInt&>(*row_group));
+              break;
+            case db721MetaData::db721Type::FLOAT:
+              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsFloat&>(*row_group));
+              break;
+            case db721MetaData::db721Type::STRING:
+              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsString&>(*row_group));
+              break;
+            }
+
+            if (!column_stats) {
+              column_stats = std::move(chunk_stats);
+            } else {
+              column_stats->Merge(*chunk_stats);
+            }
+
+        }
+        return column_stats;
+  }
+
   }

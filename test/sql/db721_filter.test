@@ -1,0 +1,25 @@
+# name: test/sql/db721_filter.test
+# description: test db721 filter
+# group: [filter123]
+
+require db721
+
+
+query I
+SELECT COUNT(*) FROM  db721_scan('data/data-chickens.db721') WHERE sex = 'MALE';
+----
+45129
+
+query I
+SELECT COUNT(*) FROM  db721_scan('data/data-chickens.db721')
+WHERE sex = 'FEMALE' AND age_weeks > 0.5 AND age_weeks < 2;
+----
+11647
+
+
+query I
+SELECT COUNT(*) FROM  db721_scan('data/data-chickens.db721')
+WHERE sex = 'FEMALE' AND age_weeks > 0.5 AND age_weeks < 2
+OR farm_name != 'Cheep Birds' AND weight_g < 700;
+----
+22721

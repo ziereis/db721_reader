@@ -87,6 +87,11 @@ namespace duckdb {
 
     void InitializeSchema();
     static LogicalType DeriveLogicalType(const db721MetaData::ColumnMetaData& column_metadata);
+    unique_ptr<BaseStatistics> ReadStatistics(column_t col_idx) const;
+    static unique_ptr<BaseStatistics> get_block_stats(const db721MetaData::BlockStatsString& blockstats);
+    static unique_ptr<BaseStatistics> get_block_stats(const db721MetaData::BlockStatsFloat& blockstats);
+    static unique_ptr<BaseStatistics> get_block_stats(const db721MetaData::BlockStatsInt& blockstats);
+
 
 
     FileSystem& fs;
@@ -97,6 +102,7 @@ namespace duckdb {
     vector<LogicalType> return_types;
     vector<string> names;
     vector<column_t> column_ids;
+    optional_ptr<TableFilterSet> filters;
 
 
   };
