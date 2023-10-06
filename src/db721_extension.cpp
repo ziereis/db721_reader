@@ -178,6 +178,7 @@ void db721ScanFunction::fill_from_plain<string>(db721ScanColumData& col_data, id
                                                 Vector& target, idx_t target_offset) {
   if (mask.none()) {
         col_data.buf.inc(32 * count);
+        return;
   }
   for (idx_t i = 0; i < count; i++) {
     if (!mask[i + target_offset]) {
@@ -185,14 +186,14 @@ void db721ScanFunction::fill_from_plain<string>(db721ScanColumData& col_data, id
       continue;
     }
       auto str_len = strlen(reinterpret_cast<const char *>(col_data.buf.ptr));
-      string str(reinterpret_cast<const char *>(col_data.buf.ptr));
-      D_ASSERT(str_len <= 32);
-      FlatVector::GetData<string_t>(target)[i + target_offset] =
-          StringVector::AddString(target, str.data(), str.size());
-      col_data.buf.inc(32);
-
-      auto entry  = FlatVector::GetData<string_t>(target)[i + target_offset];
-      entry.Verify();
+      if (str_len > 0) {
+        D_ASSERT(str_len <= 32);
+        FlatVector::GetData<string_t>(target)[i + target_offset] =
+            StringVector::AddString(target, reinterpret_cast<const char *>(col_data.buf.ptr), str_len);
+      } else {
+        FlatVector::SetNull(target, i + target_offset, true);
+      }
+    col_data.buf.inc(32);
   }
 }
 
@@ -291,6 +292,44 @@ static void FilterOperationSwitch(Vector &v, Value &constant, db721_filter_t &fi
   }
 }
 
+static void FilterIsNotNull(Vector &v, db721_filter_t &filter_mask, idx_t count) {
+  if (v.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+    auto &mask = ConstantVector::Validity(v);
+    if (!mask.RowIsValid(0)) {
+      filter_mask.reset();
+    }
+    return;
+  }
+  D_ASSERT(v.GetVectorType() == VectorType::FLAT_VECTOR);
+
+  auto &mask = FlatVector::Validity(v);
+  if (!mask.AllValid()) {
+    for (idx_t i = 0; i < count; i++) {
+      filter_mask[i] = filter_mask[i] && mask.RowIsValid(i);
+    }
+  }
+}
+
+static void FilterIsNull(Vector &v, db721_filter_t &filter_mask, idx_t count) {
+  if (v.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+    auto &mask = ConstantVector::Validity(v);
+    if (mask.RowIsValid(0)) {
+      filter_mask.reset();
+    }
+    return;
+  }
+  D_ASSERT(v.GetVectorType() == VectorType::FLAT_VECTOR);
+
+  auto &mask = FlatVector::Validity(v);
+  if (mask.AllValid()) {
+    filter_mask.reset();
+  } else {
+    for (idx_t i = 0; i < count; i++) {
+      filter_mask[i] = filter_mask[i] && !mask.RowIsValid(i);
+    }
+  }
+}
+
 static void ApplyFilter(Vector &v, TableFilter &filter, db721_filter_t& filter_mask, idx_t count) {
   switch (filter.filter_type) {
   case TableFilterType::CONJUNCTION_AND: {
@@ -335,12 +374,10 @@ static void ApplyFilter(Vector &v, TableFilter &filter, db721_filter_t& filter_m
     break;
   }
   case TableFilterType::IS_NOT_NULL:
-    // nulls dont exist so dont do anything
+    FilterIsNotNull(v, filter_mask, count);
    break;
   case TableFilterType::IS_NULL:{
-    // idk but i hope this gets initialized as all false
-    db721_filter_t is_null = false;
-    filter_mask &= is_null;
+   FilterIsNull(v, filter_mask, count);
     break;
   }
   default:
@@ -379,6 +416,8 @@ bool db721ScanFunction::db721ScanImplementation(ClientContext &context, TableFun
       data.column_data[file_col_idx].chunk_size =
           data.reader->metadata->columns[file_col_idx].block_stats[data.current_group]->count;
     }
+
+    return true;
   }
 
 
