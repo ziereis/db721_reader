@@ -79,7 +79,7 @@ namespace duckdb {
     void read(Allocator& allocator, FileHandle& file_handle,
               uint64_t metadata_pos, uint32_t footer_len);
     uint32_t NumRowGroups() const;
-    idx_t NumRowsOfGroup(idx_t group) const;
+    int64_t NumRowsOfGroup(idx_t group) const;
 
 
   };

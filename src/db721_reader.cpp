@@ -177,7 +177,7 @@ namespace duckdb {
   uint32_t db721MetaData::NumRowGroups() const {
         return columns[0].num_blocks;
   }
-  idx_t db721MetaData::NumRowsOfGroup(idx_t group) const {
+  int64_t db721MetaData::NumRowsOfGroup(idx_t group) const {
         D_ASSERT(!columns.empty());
         return columns[0].block_stats[group]->count;
   }
@@ -481,7 +481,7 @@ bool db721Reader::ScanImplementation(ClientContext &context, TableFunctionInput 
   }
 
 
-  auto output_chunk_rows = std::min((uint64_t)STANDARD_VECTOR_SIZE, metadata->NumRowsOfGroup(data.current_group));
+  auto output_chunk_rows = std::min((int64_t)STANDARD_VECTOR_SIZE, metadata->NumRowsOfGroup(data.current_group) - data.group_offset);
 
   if (output_chunk_rows == 0) {
     data.finished = true;
