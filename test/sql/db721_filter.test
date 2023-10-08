@@ -12,7 +12,7 @@ SELECT COUNT(*) FROM db721_scan('data/data-chickens.db721') WHERE sex = 'ZOO';
 
 #should skip the first and second row group
 query I
-SELECT COUNT(*) FROM db721_scan('data/data-chickens.db721') WHERE farm_name = 'Incubator';
+SELECT * FROM db721_scan('data/data-chickens.db721') WHERE farm_name = 'Incubator';
 ----
 10000
 

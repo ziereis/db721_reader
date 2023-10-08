@@ -14,6 +14,8 @@
 
 #include <exception>
 
+//copied form parquet reader
+
 namespace duckdb {
 
 class ByteBuffer { // on to the 10 thousandth impl

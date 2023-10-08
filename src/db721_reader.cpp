@@ -3,6 +3,7 @@
 #include "resizable_buffer.hpp"
 #include "yyjson.h"
 #include <iostream>
+#include "filter_operations.hpp"
 
 namespace duckdb {
 
@@ -21,21 +22,21 @@ namespace duckdb {
       return *yyjson_doc_get_root(doc);
   }
 
-  string JsonReader::get_str(yyjson_val &obj) const {
+  string JsonReader::get_str(yyjson_val &obj) {
       D_ASSERT(yyjson_is_str(&obj));
       const char* str = yyjson_get_str(&obj);
       return string(str);
   }
 
-  yyjson_val &JsonReader::get_obj(yyjson_val &obj, const string& key) const {
+  yyjson_val &JsonReader::get_obj(yyjson_val &obj, const string& key) {
     return *yyjson_obj_get(&obj, key.data());
   }
 
-  int32_t JsonReader::get_int(yyjson_val &obj) const {
+  int32_t JsonReader::get_int(yyjson_val &obj) {
     D_ASSERT(yyjson_is_int(&obj));
     return yyjson_get_int(&obj);
   }
-  float JsonReader::get_float(yyjson_val &obj) const {
+  float JsonReader::get_float(yyjson_val &obj) {
     return static_cast<float>(yyjson_get_real(&obj));
 
   }
@@ -176,6 +177,10 @@ namespace duckdb {
   uint32_t db721MetaData::NumRowGroups() const {
         return columns[0].num_blocks;
   }
+  idx_t db721MetaData::NumRowsOfGroup(idx_t group) const {
+        D_ASSERT(!columns.empty());
+        return columns[0].block_stats[group]->count;
+  }
 
   static unique_ptr<db721MetaData> LoadMetadata(Allocator& allocator, FileHandle& file_handle) {
 
@@ -207,6 +212,96 @@ namespace duckdb {
 
   }
 
+  //return true of chunk can be skipped if not false
+  bool LoadChunk(db721ScanBindData &data, unsigned long col_idx) {
+
+    int32_t chunk_start;
+    int32_t chunk_len;
+    auto file_col_idx = data.reader->column_ids[col_idx];
+    auto& col = data.reader->metadata->columns[file_col_idx];
+    auto& block = col.block_stats[data.current_group];
+    chunk_start = block->block_start;
+    chunk_len = block->total_size;
+
+    if (data.reader->filters) {
+      auto filter_entry = data.reader->filters->filters.find(col_idx);
+      if (filter_entry != data.reader->filters->filters.end()) {
+        unique_ptr<BaseStatistics> stats;
+        switch (col.type) {
+        case db721Type::INT:
+          stats = db721Reader::get_block_stats(
+              dynamic_cast<BlockStatsInt &>(*block));
+          break;
+        case db721Type::FLOAT:
+          stats = db721Reader::get_block_stats(
+              dynamic_cast<BlockStatsFloat &>(*block));
+          break;
+        case db721Type::STRING:
+          stats = db721Reader::get_block_stats(
+              dynamic_cast<BlockStatsString &>(*block));
+          break;
+        }
+        auto &filter = filter_entry->second;
+        auto prune_result = filter->CheckStatistics(*stats);
+        if (prune_result == FilterPropagateResult::FILTER_ALWAYS_FALSE) {
+          return true;
+        }
+      }
+    }
+    auto* file_handle  = data.reader->file_handle.get();
+
+    data.column_data[file_col_idx].buf = ResizeableBuffer();
+
+    file_handle->Seek(chunk_start);
+    data.column_data[file_col_idx].buf.resize(data.reader->allocator,chunk_len);
+    file_handle->Read(data.column_data[file_col_idx].buf.ptr, chunk_len);
+    return false;
+
+
+  }
+
+
+  template<class T>
+  static void fill_from_plain(db721ScanColumData& col_data, idx_t count, db721_filter_t mask,
+                              Vector& target, idx_t target_offset) {
+    if (mask.none()) {
+        col_data.buf.inc(sizeof(T) * count);
+        return;
+    }
+    for (idx_t i = 0; i < count; i++) {
+        auto value = col_data.buf.read<T>();
+        if (!mask[i + target_offset]) {
+          continue;
+        } else {
+          reinterpret_cast<T*>(FlatVector::GetData(target))[i + target_offset] = value;
+        }
+    }
+  }
+
+  template<>
+  void fill_from_plain<string>(db721ScanColumData& col_data, idx_t count, db721_filter_t mask,
+                                                  Vector& target, idx_t target_offset) {
+    if (mask.none()) {
+        col_data.buf.inc(32 * count);
+        return;
+    }
+    for (idx_t i = 0; i < count; i++) {
+        if (!mask[i + target_offset]) {
+          col_data.buf.inc(32);
+          continue;
+        }
+        auto str_len = strlen(reinterpret_cast<const char *>(col_data.buf.ptr));
+        if (str_len > 0) {
+          D_ASSERT(str_len <= 32);
+          FlatVector::GetData<string_t>(target)[i + target_offset] =
+              StringVector::AddString(target, reinterpret_cast<const char *>(col_data.buf.ptr), str_len);
+        } else {
+          FlatVector::SetNull(target, i + target_offset, true);
+        }
+        col_data.buf.inc(32);
+    }
+  }
+
   db721Reader::db721Reader(ClientContext &context, string file_name)
       : fs(FileSystem::GetFileSystem(context))
       , allocator(BufferAllocator::Get(context))
@@ -229,25 +324,25 @@ namespace duckdb {
   }
 
   LogicalType db721Reader::DeriveLogicalType(
-      const db721MetaData::ColumnMetaData &column_metadata) {
+      const ColumnMetaData &column_metadata) {
         switch (column_metadata.type) {
-          case db721MetaData::db721Type::INT:
+          case db721Type::INT:
             return LogicalType::INTEGER;
-          case db721MetaData::db721Type::FLOAT:
+          case db721Type::FLOAT:
             return LogicalType::FLOAT;
-          case db721MetaData::db721Type::STRING:
+          case db721Type::STRING:
             return LogicalType::VARCHAR;
         }
   }
 
-   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsString& blockstats) {
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const BlockStatsString& blockstats) {
         auto string_stats = StringStats::CreateEmpty(LogicalType::VARCHAR);
         StringStats::Update(string_stats, blockstats.min);
         StringStats::Update(string_stats, blockstats.max);
         return string_stats.ToUnique();
   }
 
-   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsInt& blockstats) {
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const BlockStatsInt& blockstats) {
         auto stats = NumericStats::CreateUnknown(LogicalType::INTEGER);
 
         Value min = blockstats.min;
@@ -259,7 +354,7 @@ namespace duckdb {
         return stats.ToUnique();
   }
 
-   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const db721MetaData::BlockStatsFloat& blockstats) {
+   unique_ptr<BaseStatistics> db721Reader::get_block_stats(const BlockStatsFloat& blockstats) {
         auto stats = NumericStats::CreateUnknown(LogicalType::FLOAT);
 
         Value min = blockstats.min;
@@ -279,14 +374,14 @@ namespace duckdb {
         for (auto& row_group : column_metadata.block_stats) {
             unique_ptr<BaseStatistics> chunk_stats;
             switch (column_metadata.type) {
-            case db721MetaData::db721Type::INT:
-              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsInt&>(*row_group));
+            case db721Type::INT:
+              chunk_stats = get_block_stats(dynamic_cast<BlockStatsInt&>(*row_group));
               break;
-            case db721MetaData::db721Type::FLOAT:
-              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsFloat&>(*row_group));
+            case db721Type::FLOAT:
+              chunk_stats = get_block_stats(dynamic_cast<BlockStatsFloat&>(*row_group));
               break;
-            case db721MetaData::db721Type::STRING:
-              chunk_stats = get_block_stats(dynamic_cast<db721MetaData::BlockStatsString&>(*row_group));
+            case db721Type::STRING:
+              chunk_stats = get_block_stats(dynamic_cast<BlockStatsString&>(*row_group));
               break;
             }
 
@@ -299,5 +394,145 @@ namespace duckdb {
         }
         return column_stats;
   }
+
+void db721Reader::ScanColumn(db721ScanBindData& data, db721_filter_t& mask, idx_t count, idx_t out_col_idx, Vector& out) {
+  auto file_col_idx = column_ids[out_col_idx];
+
+  if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+    Value constant_42 = Value::BIGINT(42);
+    out.Reference(constant_42);
+    return;
+  }
+
+  auto &col_data = data.column_data[file_col_idx];
+  idx_t output_offset = 0;
+  while (output_offset < count) {
+    auto current_batch_size = std::min(col_data.RowsLeftToScan(), count - output_offset);
+
+    if (current_batch_size == 0) {
+      break;
+    }
+
+    switch (return_types[file_col_idx].id()) {
+    case LogicalType::INTEGER:
+      fill_from_plain<int32_t>(col_data, current_batch_size, mask, out, output_offset);
+      break;
+    case LogicalType::FLOAT:
+      fill_from_plain<float>(col_data, current_batch_size, mask, out, output_offset);
+      break;
+    case LogicalType::VARCHAR:
+      fill_from_plain<string>(col_data, current_batch_size, mask, out, output_offset);
+      break;
+    default:
+      throw NotImplementedException("Unimplemented type for db721 reader");
+    }
+    output_offset += current_batch_size;
+    col_data.InrementOffset(current_batch_size);
+  }
+
+}
+
+void db721Reader::Scan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+    while(ScanImplementation(context, data_p, output)) {
+      if (output.size() > 0) {
+        break;
+      }
+      output.Reset();
+
+    }
+}
+
+bool db721Reader::ScanImplementation(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+  auto &data = data_p.bind_data->CastNoConst<db721ScanBindData>();
+
+  if (data.finished) {
+    return false;
+  }
+
+  if ((data.current_group < 0) ||
+      (data.group_offset >= metadata->NumRowsOfGroup(data.current_group))) {
+    data.current_group++;
+    data.group_offset = 0;
+    if (data.current_group >= metadata->NumRowGroups()) {
+      data.finished = true;
+      return false;
+    }
+
+    for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
+      auto file_col_idx = column_ids[out_col_idx];
+
+      if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+        continue;
+      }
+
+      auto& col_data = data.column_data[file_col_idx];
+
+      bool can_skip = LoadChunk(data, out_col_idx);
+      if (can_skip) {
+        data.group_offset = (int64_t) metadata->NumRowsOfGroup(data.current_group);
+      } else {
+        col_data.SetOffset(0);
+        col_data.SetSize(metadata->NumRowsOfGroup(data.current_group));
+
+      }
+    }
+
+    return true;
+  }
+
+
+  auto output_chunk_rows = std::min((uint64_t)STANDARD_VECTOR_SIZE, metadata->NumRowsOfGroup(data.current_group));
+
+  if (output_chunk_rows == 0) {
+    data.finished = true;
+    return false;
+  }
+  output.SetCardinality(output_chunk_rows);
+  D_ASSERT(output.size() > 0);
+
+  db721_filter_t filter_mask;
+  filter_mask.set();
+
+  for(idx_t i = output_chunk_rows; i < STANDARD_VECTOR_SIZE; i++) {
+    filter_mask.set(i, false);
+  }
+
+
+  if (filters) {
+    vector<bool> need_to_read(column_ids.size(), true);
+
+    for (auto& filter_col : filters->filters) {
+      if (filter_mask.none()) {
+        break;
+      }
+      ScanColumn(data,filter_mask, output.size(), filter_col.first, output.data[filter_col.first]);
+      need_to_read[filter_col.first] = false;
+
+      ApplyFilter(output.data[filter_col.first], *filter_col.second, filter_mask, output_chunk_rows);
+
+    }
+
+    for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
+      if (need_to_read[col_idx]) {
+        ScanColumn(data,filter_mask, output.size(), col_idx, output.data[col_idx]);
+      }
+    }
+
+    idx_t sel_size = 0;
+    for (idx_t i = 0; i < output_chunk_rows; i++) {
+      if (filter_mask[i]) {
+        data.sel.set_index(sel_size++, i);
+      }
+    }
+    output.Slice(data.sel, sel_size);
+  } else {
+    for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
+      ScanColumn(data,filter_mask, output.size(), col_idx, output.data[col_idx]);
+    }
+  }
+
+  data.group_offset += (int64_t) output_chunk_rows;
+  return true;
+}
 
   }
