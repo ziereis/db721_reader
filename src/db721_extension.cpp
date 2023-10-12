@@ -20,14 +20,13 @@
 
 namespace duckdb {
 
-struct db721ScanGlobalState : public GlobalTableFunctionState {
-};
+
 
 
 class db721ScanFunction : public TableFunction {
 public:
   db721ScanFunction()
-  : TableFunction("db721_scan", {LogicalType::VARCHAR}, db721Scan, db721ScanBind, db721ScanInitGlobal) {
+  : TableFunction("db721_scan", {LogicalType::VARCHAR}, db721Scan, db721ScanBind, db721ScanInitGlobal, db721ScanInitLocal) {
     projection_pushdown = true;
     filter_pushdown = true;
     statistics = db721ScanStats;
@@ -42,9 +41,6 @@ private:
     names = reader->names;
 
     auto result = make_uniq<db721ScanBindData>();
-    result->group_offset = 0;
-    result->current_group = -1;
-    result->column_data.resize(reader->return_types.size());
 
     result->sel.Initialize(STANDARD_VECTOR_SIZE);
     result->reader = std::move(reader);
@@ -56,12 +52,56 @@ private:
   static unique_ptr<GlobalTableFunctionState> db721ScanInitGlobal(ClientContext &context,
                                                                   TableFunctionInitInput &input) {
     auto& bind_data = input.bind_data->Cast<db721ScanBindData>();
-    bind_data.reader->column_ids = input.column_ids;
-    bind_data.reader->filters = input.filters;
-
     auto result = make_uniq<db721ScanGlobalState>();
 
+    result->column_ids = input.column_ids;
+    result->filters = input.filters.get();
+    result->row_group_index = 0;
+    result->max_threads = bind_data.reader->metadata->NumRowGroups();
+    result->reader = bind_data.reader.get();
+
     return std::move(result);
+  }
+
+  static unique_ptr<LocalTableFunctionState> db721ScanInitLocal(ExecutionContext &context,
+                                                                TableFunctionInitInput &input,
+                                                                GlobalTableFunctionState *global_state) {
+    auto& bind_data = input.bind_data->Cast<db721ScanBindData>();
+    auto& global_data = global_state->Cast<db721ScanGlobalState>();
+
+    auto result = make_uniq<db721ScanLocalState>();
+    result->is_parallel = true;
+
+    result->column_data.resize(global_data.reader->return_types.size());
+    result->file_handle = global_data.reader->GetNewFileHandle();
+
+    if (!db721ParallelStateNext(*result, global_data)) {
+      return nullptr;
+    }
+
+    return std::move(result);
+
+  };
+
+  static bool db721ParallelStateNext( db721ScanLocalState &local_state, db721ScanGlobalState& global_state) {
+      unique_lock<mutex> lock(global_state.lock);
+
+      if (global_state.row_group_index < global_state.reader->metadata->NumRowGroups()) {
+        local_state.reader = global_state.reader;
+        InitializeScan(local_state, {global_state.row_group_index});
+        global_state.row_group_index++;
+        return true;
+      }
+      return false;
+  }
+
+  static void InitializeScan(db721ScanLocalState &local_state,
+                                   vector<idx_t> groups_to_read) {
+      local_state.current_group = -1;
+      local_state.finished = false;
+      local_state.group_offset = 0;
+      local_state.group_idx_list = std::move(groups_to_read);
+      local_state.sel.Initialize(STANDARD_VECTOR_SIZE);
   }
 
   static unique_ptr<BaseStatistics> db721ScanStats(ClientContext &context, const FunctionData *bind_data,
@@ -77,7 +117,23 @@ private:
 
 
   static void db721Scan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-        data_p.bind_data->Cast<db721ScanBindData>().reader->Scan(context, data_p,output);
+        if (!data_p.local_state) {
+          return;
+        }
+
+        auto& local_state = data_p.local_state->Cast<db721ScanLocalState>();
+        auto& global_state = data_p.global_state->Cast<db721ScanGlobalState>();
+
+        do {
+          local_state.reader->Scan(local_state, global_state, output);
+          if (output.size() > 0) {
+            return;
+          }
+          if (!db721ParallelStateNext(local_state, global_state)) {
+            return;
+          }
+
+        } while (true);
   }
 
 };

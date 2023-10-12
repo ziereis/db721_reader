@@ -111,16 +111,45 @@ public:
 };
 
   struct db721ScanBindData : public TableFunctionData {
-    int64_t current_group;
-    int64_t group_offset;
     unique_ptr<db721Reader> reader;
     bool finished;
     SelectionVector sel;
-    vector<db721ScanColumData> column_data;
   };
 
+  struct db721ScanGlobalState : public GlobalTableFunctionState {
+    mutex lock;
+    mutex file_lock;
+    idx_t row_group_index;
+    idx_t max_threads;
+    db721Reader* reader;
+    vector<idx_t> projection_ids;
+    vector<LogicalType> scanned_types;
+    vector<column_t> column_ids;
+    TableFilterSet *filters;
+
+     idx_t MaxThreads() const override{
+      return max_threads;
+    }
+
+  };
+
+  struct db721ScanLocalState : public LocalTableFunctionState {
+    db721Reader* reader;
+    bool is_parallel;
+    int64_t current_group;
+    idx_t group_offset;
+    bool finished;
+    vector<db721ScanColumData> column_data;
+
+    unique_ptr<FileHandle> file_handle;
+
+    vector<idx_t> group_idx_list;
+    SelectionVector sel;
+
+    ResizeableBuffer buf;
 
 
+  };
 
 
   class db721Reader {
@@ -133,9 +162,11 @@ public:
     static unique_ptr<BaseStatistics> get_block_stats(const BlockStatsString& blockstats);
     static unique_ptr<BaseStatistics> get_block_stats(const BlockStatsFloat& blockstats);
     static unique_ptr<BaseStatistics> get_block_stats(const BlockStatsInt& blockstats);
-    void ScanColumn(db721ScanBindData&, db721_filter_t& mask, idx_t count, idx_t out_col_idx, Vector& out);
-    void Scan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
-    bool ScanImplementation(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
+    const idx_t GetRowsOfGroup(db721ScanLocalState& state);
+    unique_ptr<FileHandle> GetNewFileHandle();
+    void ScanColumn(db721ScanLocalState& local_state, db721ScanGlobalState& global_state, db721_filter_t& mask, idx_t count, idx_t out_col_idx, Vector& out);
+    void Scan(db721ScanLocalState& local_state, db721ScanGlobalState& global_state, DataChunk &output);
+    bool ScanImplementation(db721ScanLocalState& local_state, db721ScanGlobalState& global_state, DataChunk &output);
 
 
 
@@ -147,9 +178,6 @@ public:
     unique_ptr<db721MetaData> metadata;
     vector<LogicalType> return_types;
     vector<string> names;
-    vector<column_t> column_ids;
-    optional_ptr<TableFilterSet> filters;
-
 
   };
 

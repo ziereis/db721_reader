@@ -213,19 +213,20 @@ namespace duckdb {
   }
 
   //return true of chunk can be skipped if not false
-  bool LoadChunk(db721ScanBindData &data, unsigned long col_idx) {
+  bool LoadChunk(db721ScanLocalState &local_state, db721ScanGlobalState& globalState, idx_t col_idx) {
+
 
     int32_t chunk_start;
     int32_t chunk_len;
-    auto file_col_idx = data.reader->column_ids[col_idx];
-    auto& col = data.reader->metadata->columns[file_col_idx];
-    auto& block = col.block_stats[data.current_group];
+    auto file_col_idx = globalState.column_ids[col_idx];
+    auto& col = local_state.reader->metadata->columns[file_col_idx];
+    auto& block = col.block_stats[local_state.group_idx_list[local_state.current_group]];
     chunk_start = block->block_start;
     chunk_len = block->total_size;
 
-    if (data.reader->filters) {
-      auto filter_entry = data.reader->filters->filters.find(col_idx);
-      if (filter_entry != data.reader->filters->filters.end()) {
+    if (globalState.filters) {
+      auto filter_entry = globalState.filters->filters.find(col_idx);
+      if (filter_entry != globalState.filters->filters.end()) {
         unique_ptr<BaseStatistics> stats;
         switch (col.type) {
         case db721Type::INT:
@@ -248,13 +249,13 @@ namespace duckdb {
         }
       }
     }
-    auto* file_handle  = data.reader->file_handle.get();
+    auto* file_handle  = local_state.file_handle.get();
 
-    data.column_data[file_col_idx].buf = ResizeableBuffer();
+    local_state.column_data[file_col_idx].buf = ResizeableBuffer();
 
     file_handle->Seek(chunk_start);
-    data.column_data[file_col_idx].buf.resize(data.reader->allocator,chunk_len);
-    file_handle->Read(data.column_data[file_col_idx].buf.ptr, chunk_len);
+    local_state.column_data[file_col_idx].buf.resize(local_state.reader->allocator,chunk_len);
+    file_handle->Read(local_state.column_data[file_col_idx].buf.ptr, chunk_len);
     return false;
 
 
@@ -395,8 +396,8 @@ namespace duckdb {
         return column_stats;
   }
 
-void db721Reader::ScanColumn(db721ScanBindData& data, db721_filter_t& mask, idx_t count, idx_t out_col_idx, Vector& out) {
-  auto file_col_idx = column_ids[out_col_idx];
+void db721Reader::ScanColumn(db721ScanLocalState& local_state, db721ScanGlobalState& global_state, db721_filter_t& mask, idx_t count, idx_t out_col_idx, Vector& out) {
+  auto file_col_idx = global_state.column_ids[out_col_idx];
 
   if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
     Value constant_42 = Value::BIGINT(42);
@@ -404,7 +405,7 @@ void db721Reader::ScanColumn(db721ScanBindData& data, db721_filter_t& mask, idx_
     return;
   }
 
-  auto &col_data = data.column_data[file_col_idx];
+  auto &col_data = local_state.column_data[file_col_idx];
   idx_t output_offset = 0;
   while (output_offset < count) {
     auto current_batch_size = std::min(col_data.RowsLeftToScan(), count - output_offset);
@@ -432,8 +433,8 @@ void db721Reader::ScanColumn(db721ScanBindData& data, db721_filter_t& mask, idx_
 
 }
 
-void db721Reader::Scan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-    while(ScanImplementation(context, data_p, output)) {
+void db721Reader::Scan(db721ScanLocalState& local_state, db721ScanGlobalState& global_state, DataChunk &output) {
+    while(ScanImplementation(local_state, global_state, output)) {
       if (output.size() > 0) {
         break;
       }
@@ -442,37 +443,36 @@ void db721Reader::Scan(ClientContext &context, TableFunctionInput &data_p, DataC
     }
 }
 
-bool db721Reader::ScanImplementation(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-  auto &data = data_p.bind_data->CastNoConst<db721ScanBindData>();
+bool db721Reader::ScanImplementation(db721ScanLocalState& state, db721ScanGlobalState& global_state, DataChunk &output) {
+    if (state.finished) {
+      return false;
+    }
 
-  if (data.finished) {
-    return false;
-  }
+  if ((state.current_group < 0) ||
+      (state.group_offset >= GetRowsOfGroup(state))) {
+      state.current_group++;
+      state.group_offset = 0;
 
-  if ((data.current_group < 0) ||
-      (data.group_offset >= metadata->NumRowsOfGroup(data.current_group))) {
-    data.current_group++;
-    data.group_offset = 0;
-    if (data.current_group >= metadata->NumRowGroups()) {
-      data.finished = true;
+    if (state.current_group >= state.group_idx_list.size()) {
+        state.finished = true;
       return false;
     }
 
     for (idx_t out_col_idx = 0; out_col_idx < output.ColumnCount(); out_col_idx++) {
-      auto file_col_idx = column_ids[out_col_idx];
+      auto file_col_idx = global_state.column_ids[out_col_idx];
 
       if (file_col_idx == COLUMN_IDENTIFIER_ROW_ID) {
         continue;
       }
 
-      auto& col_data = data.column_data[file_col_idx];
+      auto& col_data = state.column_data[file_col_idx];
 
-      bool can_skip = LoadChunk(data, out_col_idx);
+      bool can_skip = LoadChunk(state, global_state, out_col_idx);
       if (can_skip) {
-        data.group_offset = (int64_t) metadata->NumRowsOfGroup(data.current_group);
+        state.group_offset = (int64_t) GetRowsOfGroup(state);
       } else {
         col_data.SetOffset(0);
-        col_data.SetSize(metadata->NumRowsOfGroup(data.current_group));
+        col_data.SetSize(GetRowsOfGroup(state));
 
       }
     }
@@ -481,10 +481,11 @@ bool db721Reader::ScanImplementation(ClientContext &context, TableFunctionInput 
   }
 
 
-  auto output_chunk_rows = std::min((int64_t)STANDARD_VECTOR_SIZE, metadata->NumRowsOfGroup(data.current_group) - data.group_offset);
+  auto output_chunk_rows = std::min((int64_t)STANDARD_VECTOR_SIZE, (int64_t)GetRowsOfGroup(state) -
+                                                                       (int64_t)state.group_offset);
 
   if (output_chunk_rows == 0) {
-    data.finished = true;
+    state.finished = true;
     return false;
   }
   output.SetCardinality(output_chunk_rows);
@@ -498,41 +499,51 @@ bool db721Reader::ScanImplementation(ClientContext &context, TableFunctionInput 
   }
 
 
-  if (filters) {
-    vector<bool> need_to_read(column_ids.size(), true);
+  if (global_state.filters) {
+    vector<bool> need_to_read(global_state.column_ids.size(), true);
 
-    for (auto& filter_col : filters->filters) {
+    for (auto& filter_col : global_state.filters->filters) {
       if (filter_mask.none()) {
         break;
       }
-      ScanColumn(data,filter_mask, output.size(), filter_col.first, output.data[filter_col.first]);
+      ScanColumn(state, global_state, filter_mask, output.size(), filter_col.first, output.data[filter_col.first]);
       need_to_read[filter_col.first] = false;
 
       ApplyFilter(output.data[filter_col.first], *filter_col.second, filter_mask, output_chunk_rows);
 
     }
 
-    for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
+    for (idx_t col_idx = 0; col_idx < global_state.column_ids.size(); col_idx++) {
       if (need_to_read[col_idx]) {
-        ScanColumn(data,filter_mask, output.size(), col_idx, output.data[col_idx]);
+        ScanColumn(state, global_state, filter_mask, output.size(), col_idx, output.data[col_idx]);
       }
     }
 
     idx_t sel_size = 0;
     for (idx_t i = 0; i < output_chunk_rows; i++) {
       if (filter_mask[i]) {
-        data.sel.set_index(sel_size++, i);
+        state.sel.set_index(sel_size++, i);
       }
     }
-    output.Slice(data.sel, sel_size);
+    output.Slice(state.sel, sel_size);
   } else {
-    for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
-      ScanColumn(data,filter_mask, output.size(), col_idx, output.data[col_idx]);
+    for (idx_t col_idx = 0; col_idx < global_state.column_ids.size(); col_idx++) {
+      ScanColumn(state, global_state, filter_mask, output.size(), col_idx, output.data[col_idx]);
     }
   }
 
-  data.group_offset += (int64_t) output_chunk_rows;
+  state.group_offset +=  output_chunk_rows;
   return true;
 }
 
-  }
+unique_ptr<FileHandle> db721Reader::GetNewFileHandle() {
+  return fs.OpenFile(filename, FileFlags::FILE_FLAGS_READ);
+}
+const idx_t db721Reader::GetRowsOfGroup(db721ScanLocalState &state) {
+  D_ASSERT(state.current_group >= 0 && (idx_t)state.current_group < state.group_idx_list.size());
+  auto row_group = state.group_idx_list[state.current_group];
+  D_ASSERT(row_group >= 0 && row_group < metadata->NumRowsOfGroup(row_group));
+  return metadata->NumRowsOfGroup(row_group);
+}
+
+}

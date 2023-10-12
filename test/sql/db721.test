@@ -3,6 +3,12 @@
 # group: [db721]
 
 # Before we load the extension, this will fail
+
+query I
+select current_setting('threads');
+----
+12
+
 statement error
 SELECT * FROM db721_scan('fails');
 ----
